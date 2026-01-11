@@ -2,6 +2,8 @@ import json
 import os
 import random
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
@@ -15,6 +17,27 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 STATE_FILE = "state.json"
+
+def start_health_server():
+    port = int(os.getenv("PORT", "8080"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format, *args):
+            return  # silence default logs
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"Health server listening on {port}", flush=True)
+    server.serve_forever()
+
+
+# Start health server in background so Railway sees an open port
+threading.Thread(target=start_health_server, daemon=True).start()
 
 
 @dataclass
