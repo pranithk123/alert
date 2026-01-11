@@ -204,6 +204,9 @@ def should_alert(prev: Optional[Dict[str, Any]], curr: Snapshot) -> bool:
 
 def main_loop():
     print("BOOT: watcher process started")
+    print("ENV CHECK:",bool(TELEGRAM_BOT_TOKEN),
+      bool(TELEGRAM_CHAT_ID),
+      flush=True)
     telegram_send("✅ SHEIN watcher started.\n" + URL)
 
     while True:
