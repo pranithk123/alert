@@ -19,4 +19,4 @@ RUN python -m playwright install chromium
 
 COPY . .
 
-CMD ["python", "shein_watch.py"]
+CMD ["python", "-u", "shein_watch.py"]
