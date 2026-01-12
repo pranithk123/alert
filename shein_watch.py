@@ -236,4 +236,14 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    main_loop()
+    # Start health server (daemon is OK)
+    threading.Thread(target=start_health_server, daemon=True).start()
+
+    # Keep main process alive forever
+    while True:
+        try:
+            main_loop()
+        except Exception as e:
+            print(f"MAIN LOOP CRASHED: {e}", flush=True)
+            time.sleep(30)
+
