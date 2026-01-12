@@ -3,12 +3,13 @@ import os
 import random
 import time
 import threading
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+from playwright.sync_api import sync_playwright
 
 # Configuration
 URL = "https://www.sheinindia.in/c/sverse-5939-37961"
@@ -20,10 +21,9 @@ PORT = int(os.getenv("PORT", "8080"))
 @dataclass
 class Snapshot:
     ts: float
-    product_count: int
-    first_products: List[str]
+    men_count: int
+    women_count: int
 
-# 1. Define telegram_send FIRST so it's available to everything below
 def telegram_send(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[WARN] Telegram creds missing. Message: {text}", flush=True)
@@ -38,10 +38,7 @@ def telegram_send(text: str) -> None:
 def start_health_server():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            # Print to logs so you can see Railway's pings
-            print(">>> Railway Health Probe answered", flush=True)
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"ok")
         def log_message(self, format, *args):
@@ -59,78 +56,82 @@ def load_state() -> Optional[Dict[str, Any]]:
     except: return None
 
 def save_state(snap: Snapshot) -> None:
-    data = {"ts": snap.ts, "product_count": snap.product_count, "first_products": snap.first_products}
+    data = {"ts": snap.ts, "men_count": snap.men_count, "women_count": snap.women_count}
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def normalize_product_signature(item: Dict[str, Any]) -> str:
-    title = (item.get("title") or "").strip()
-    href = (item.get("href") or "").strip()
-    return f"{title} | {href}"
+def extract_number(text: str) -> int:
+    """Extracts '54' from 'Women (54)'"""
+    match = re.search(r'\((\d+)\)', text)
+    return int(match.group(1)) if match else 0
 
 def scrape_snapshot() -> Snapshot:
-    # Use the browser path defined in your Dockerfile
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/pw-browsers"
-    
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
+            headless=True, 
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
         )
-        context = browser.new_context(user_agent="Mozilla/5.0")
-        page = context.new_page()
+        page = browser.new_page(user_agent="Mozilla/5.0")
         
-        print(f"Scraping {URL}...", flush=True)
-        try:
-            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(5000)
+        print(f"Scraping counts from {URL}...", flush=True)
+        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        
+        # Wait for the filter sidebar row to appear
+        page.wait_for_selector(".S-p-attr-row", timeout=15000)
 
-            # Common SHEIN link selectors
-            anchors = page.locator("a[href*='/p/']")
-            count = anchors.count()
-            
-            products = []
-            seen = set()
-            for i in range(min(count, 15)):
-                href = anchors.nth(i).get_attribute("href") or ""
-                if not href or href in seen: continue
-                seen.add(href)
-                products.append({"title": "Item", "href": href})
+        men_count = 0
+        women_count = 0
 
-            return Snapshot(ts=time.time(), product_count=len(products), first_products=[normalize_product_signature(p) for p in products])
-        finally:
-            browser.close()
+        # Find all filter rows (Women, Men, etc.)
+        rows = page.locator(".S-p-attr-row")
+        for i in range(rows.count()):
+            row_text = rows.nth(i).inner_text()
+            if "Women" in row_text:
+                women_count = extract_number(row_text)
+            elif "Men" in row_text:
+                men_count = extract_number(row_text)
+
+        browser.close()
+        return Snapshot(ts=time.time(), men_count=men_count, women_count=women_count)
 
 def main_loop():
-    # Delay startup so health check passes before heavy scraping starts
-    print("⏳ Waiting 15s for stability...", flush=True)
+    print("⏳ Starting in 15s...", flush=True)
     time.sleep(15)
-    
-    print("🚀 Scraper thread started.", flush=True)
-    # Sending test message to confirm connection
-    telegram_send("✅ SHEIN Bot is now active and monitoring!")
+    telegram_send("✅ SHEIN Stock Bot is active (Checking every 40s).")
     
     while True:
         try:
             prev = load_state()
             curr = scrape_snapshot()
             
-            # Alert if count increases or items change
-            if prev and (curr.product_count > int(prev.get("product_count", 0)) or curr.first_products != prev.get("first_products", [])):
-                telegram_send(f"🚨 SHEIN UPDATE!\nItems found: {curr.product_count}\n{URL}")
+            if prev:
+                pm, pw = int(prev.get("men_count", 0)), int(prev.get("women_count", 0))
+                dm, dw = curr.men_count - pm, curr.women_count - pw
+
+                if dm != 0 or dw != 0:
+                    mi = "⬆️" if dm > 0 else "⬇️"
+                    wi = "⬆️" if dw > 0 else "⬇️"
+                    
+                    msg = (
+                        "🔔 Shein Stock Update\n\n"
+                        f"👨 Men → {curr.men_count} {mi} {dm:+d}\n"
+                        f"👩 Women → {curr.women_count} {wi} {dw:+d}\n\n"
+                        f"⏰ {time.strftime('%d %b %Y, %I:%M %p')}\n\n"
+                        f"Direct Link: {URL}"
+                    )
+                    telegram_send(msg)
             
             save_state(curr)
-            print(f"Check complete. Found {curr.product_count} items.", flush=True)
+            print(f"Update: Men({curr.men_count}) Women({curr.women_count})", flush=True)
         except Exception as e:
-            print(f"Scraper Error: {e}", flush=True)
+            print(f"Error: {e}", flush=True)
         
-        time.sleep(random.randint(60, 150))
+        # Fixed 40-second interval as requested
+        time.sleep(40)
 
 if __name__ == "__main__":
-    # Start Scraper in background
     threading.Thread(target=main_loop, daemon=True).start()
-    
-    # Run Health Server in foreground to keep container alive
     try:
         start_health_server()
     except Exception as e:
