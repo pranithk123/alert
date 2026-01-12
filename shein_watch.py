@@ -37,7 +37,6 @@ def start_health_server():
 
 
 # Start health server in background so Railway sees an open port
-threading.Thread(target=start_health_server, daemon=True).start()
 
 
 @dataclass
