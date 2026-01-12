@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 
 import requests
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync  # 🔥 New Stealth Plugin
 
 # Configuration
 URL = "https://www.sheinindia.in/c/sverse-5939-37961"
@@ -26,7 +27,7 @@ class Snapshot:
 
 def telegram_send(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[WARN] Telegram creds missing. Message: {text}", flush=True)
+        print(f"[WARN] Telegram creds missing.", flush=True)
         return
     endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -61,8 +62,8 @@ def save_state(snap: Snapshot) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def extract_number(text: str) -> int:
-    """Extracts '54' from 'Women (54)' or '54 Items Found'"""
-    match = re.search(r'\((\d+)\)', text) or re.search(r'(\d+)', text)
+    """Extracts '54' from strings like 'Women (54)'"""
+    match = re.search(r'\((\d+)\)', text)
     return int(match.group(1)) if match else 0
 
 def scrape_snapshot() -> Snapshot:
@@ -72,44 +73,45 @@ def scrape_snapshot() -> Snapshot:
             headless=True, 
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
         )
-        # Force Desktop view to ensure sidebar is visible
+        # Use a real Desktop viewport
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = context.new_page()
         
-        print(f"Scraping {URL}...", flush=True)
+        # 🔥 Enable Stealth Mode to bypass bot detection
+        stealth_sync(page) 
+        
+        print(f"Scraping counts from {URL}...", flush=True)
         men_count = 0
         women_count = 0
         
         try:
-            # Wait for network activity to settle
             page.goto(URL, wait_until="networkidle", timeout=60000)
-            
-            # Try multiple selectors for the sidebar in case the class changes
-            selectors = [".S-p-attr-row", ".filter-item", ".attr-item", ".S-p-filter-v2__item"]
-            found_rows = None
-            
+            # Give extra time for JS categories to load
+            page.wait_for_timeout(5000) 
+
+            # Strategy 1: Look for specific sidebar selectors
+            selectors = [".S-p-attr-row", ".filter-item", ".S-p-filter-v2__item"]
             for sel in selectors:
                 rows = page.locator(sel)
                 if rows.count() > 0:
-                    found_rows = rows
-                    break
-            
-            if found_rows:
-                for i in range(found_rows.count()):
-                    row_text = found_rows.nth(i).inner_text()
-                    if "Women" in row_text:
-                        women_count = extract_number(row_text)
-                    elif "Men" in row_text:
-                        men_count = extract_number(row_text)
-            else:
-                print("DEBUG: Sidebar not found. Checking top summary...", flush=True)
-                summary = page.locator(".S-p-attr-row-summary, .items-count").first
-                if summary.count() > 0:
-                    # If sidebar is missing, we use the total count as a fallback
-                    women_count = extract_number(summary.inner_text())
+                    for i in range(rows.count()):
+                        row_text = rows.nth(i).inner_text()
+                        if "Women" in row_text: women_count = extract_number(row_text)
+                        elif "Men" in row_text: men_count = extract_number(row_text)
+                    if women_count > 0 or men_count > 0: break
+
+            # Strategy 2: Fallback - Search the entire page source if sidebar is hidden
+            if men_count == 0 and women_count == 0:
+                print("DEBUG: Sidebar missing. Searching full page content...", flush=True)
+                content = page.content()
+                # Find patterns like "Men (2)" or "Women (54)" anywhere in the text
+                m_match = re.search(r'Men\s*\((\d+)\)', content)
+                w_match = re.search(r'Women\s*\((\d+)\)', content)
+                if m_match: men_count = int(m_match.group(1))
+                if w_match: women_count = int(w_match.group(1))
 
         except Exception as e:
             print(f"Scrape Error: {e}", flush=True)
@@ -121,7 +123,7 @@ def scrape_snapshot() -> Snapshot:
 def main_loop():
     print("⏳ Starting in 15s...", flush=True)
     time.sleep(15)
-    telegram_send("✅ SHEIN Stock Bot is active (Checking every 40s).")
+    telegram_send("✅ SHEIN Stealth Watcher active.")
     
     while True:
         try:
@@ -132,7 +134,6 @@ def main_loop():
                 pm, pw = int(prev.get("men_count", 0)), int(prev.get("women_count", 0))
                 dm, dw = curr.men_count - pm, curr.women_count - pw
 
-                # Alert if either count changed
                 if dm != 0 or dw != 0:
                     mi = "⬆️" if dm > 0 else "⬇️"
                     wi = "⬆️" if dw > 0 else "⬇️"
@@ -151,12 +152,9 @@ def main_loop():
         except Exception as e:
             print(f"Loop Error: {e}", flush=True)
         
-        # Check every 40 seconds with slight jitter
-        time.sleep(random.randint(35, 45))
+        # 🔥 Slow down slightly to avoid instant IP bans
+        time.sleep(random.randint(60, 90))
 
 if __name__ == "__main__":
     threading.Thread(target=main_loop, daemon=True).start()
-    try:
-        start_health_server()
-    except Exception as e:
-        print(f"CRITICAL ERROR: {e}", flush=True)
+    start_health_server()
