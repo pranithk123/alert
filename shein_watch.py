@@ -15,10 +15,17 @@ URL = "https://www.sheinindia.in/c/sverse-5939-37961"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 STATE_FILE = "state.json"
-# Matches the Railway Healthcheck path
+# IMPORTANT: Ensure 'PORT' is set to 8080 in Railway Variables
 PORT = int(os.getenv("PORT", "8080")) 
 
+@dataclass
+class Snapshot:
+    ts: float
+    product_count: int
+    first_products: List[str]
+
 def start_health_server():
+    """Runs in the main thread to keep Railway happy."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -29,18 +36,12 @@ def start_health_server():
             return 
 
     server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"Health server listening on {PORT}", flush=True)
+    print(f"✅ Health server active on port {PORT}", flush=True)
     server.serve_forever()
-
-@dataclass
-class Snapshot:
-    ts: float
-    product_count: int
-    first_products: List[str]
 
 def telegram_send(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[WARN] Telegram credentials not set.", flush=True)
+        print(f"[WARN] Telegram credentials missing. Message: {text}", flush=True)
         return
     endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -64,22 +65,22 @@ def save_state(snap: Snapshot) -> None:
 def normalize_product_signature(item: Dict[str, Any]) -> str:
     title = (item.get("title") or "").strip()
     href = (item.get("href") or "").strip()
-    price = (item.get("price") or "").strip()
-    return f"{title} | {price} | {href}"
+    return f"{title} | {href}"
 
 def scrape_snapshot() -> Snapshot:
-    # Forces Playwright to use the folder we created in the Dockerfile
+    # Explicitly set the path where Dockerfile installed the browser
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/pw-browsers"
     
     with sync_playwright() as p:
-        # Args added to prevent crashes in low-RAM environments
+        # Optimized args to survive on Railway's low-RAM plans
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu"
+                "--disable-gpu",
+                "--single-process"  # Consolidates memory usage
             ]
         )
         context = browser.new_context(
@@ -87,12 +88,13 @@ def scrape_snapshot() -> Snapshot:
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
         )
         page = context.new_page()
+        
+        print(f"Scraping {URL}...", flush=True)
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
         products = []
         seen = set()
-        # Common SHEIN selectors
         selectors = ["a[href*='/p/']", "a[href*='-p-']", ".product-card a"]
 
         for sel in selectors:
@@ -104,46 +106,48 @@ def scrape_snapshot() -> Snapshot:
                 if href.startswith("/"): href = "https://www.sheinindia.in" + href
                 
                 text = (a.inner_text() or "").strip()
-                sig_key = href
-                if sig_key in seen: continue
-                seen.add(sig_key)
-                products.append({"title": text[:50], "href": href, "price": ""})
+                if href in seen: continue
+                seen.add(href)
+                products.append({"title": text[:50], "href": href})
             if len(products) > 5: break
 
         browser.close()
         sigs = [normalize_product_signature(x) for x in products[:10]]
         return Snapshot(ts=time.time(), product_count=len(products), first_products=sigs)
 
-def should_alert(prev: Optional[Dict[str, Any]], curr: Snapshot) -> bool:
-    if prev is None: return False
-    if curr.product_count > int(prev.get("product_count", 0)): return True
-    if curr.first_products != prev.get("first_products", []): return True
-    return False
-
 def main_loop():
-    print("Watcher process started...", flush=True)
+    """Background thread logic."""
+    print("🚀 Watcher background thread started...", flush=True)
     telegram_send("✅ SHEIN watcher started.\n" + URL)
+    
     while True:
         try:
             prev = load_state()
             curr = scrape_snapshot()
-            if should_alert(prev, curr):
-                msg = f"🚨 Change detected!\nItems: {curr.product_count}\n{URL}"
+            
+            # Count check or signature change check
+            if prev and (curr.product_count > int(prev.get("product_count", 0)) or 
+                         curr.first_products != prev.get("first_products", [])):
+                msg = f"🚨 SHEIN UPDATE!\nItems found: {curr.product_count}\nLink: {URL}"
                 telegram_send(msg)
+            
             save_state(curr)
+            print(f"Check complete. Found {curr.product_count} items.", flush=True)
         except Exception as e:
-            print(f"Error: {e}", flush=True)
-        time.sleep(random.randint(40, 80))
+            print(f"Scraper Error: {e}", flush=True)
+        
+        # Sleep 1-2 minutes between checks
+        time.sleep(random.randint(60, 120))
 
 if __name__ == "__main__":
-    # 1. Start health server in a background thread
-    threading.Thread(target=start_health_server, daemon=True).start()
+    # 1. Start Scraper in Background
+    scraper_thread = threading.Thread(target=main_loop, daemon=True)
+    scraper_thread.start()
     
-    # 2. Keep the main thread alive FOREVER
-    print("BOOT: Starting main watcher loop", flush=True)
-    while True:
-        try:
-            main_loop() # This function has its own while True loop inside
-        except Exception as e:
-            print(f"CRITICAL: Main loop crashed with {e}. Restarting in 30s...", flush=True)
-            time.sleep(30)
+    # 2. Run Health Server in Foreground (Main Thread)
+    # This ensures the container stays "Started" as long as the server is up.
+    try:
+        start_health_server()
+    except Exception as e:
+        print(f"Health Server Crash: {e}", flush=True)
+        time.sleep(10)
