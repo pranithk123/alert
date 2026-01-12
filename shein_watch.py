@@ -83,6 +83,7 @@ def main_loop():
     time.sleep(10)
     
     print("🚀 Scraper thread fully engaged.", flush=True)
+    telegram_send("Test: The bot is alive and checking SHEIN now!")
     while True:
         try:
             curr = scrape_snapshot()
