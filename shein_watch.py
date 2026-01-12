@@ -146,13 +146,15 @@ def main_loop():
 
 if __name__ == "__main__":
     # 1. Start Scraper Loop in a background thread
+    # This prevents the scraper from blocking the health server
     scraper_thread = threading.Thread(target=main_loop, daemon=True)
     scraper_thread.start()
     
     # 2. Run Health Server in the FOREGROUND (Main Thread)
-    # This keeps the container running and responding to Railway's health checks
+    # This is the 'anchor'. As long as this runs, the container stays UP.
     try:
         start_health_server()
     except Exception as e:
         print(f"Health Server Crash: {e}", flush=True)
-        time.sleep(10)
+        # Give you time to see the error in logs
+        time.sleep(60)
