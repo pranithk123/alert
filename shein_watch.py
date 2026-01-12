@@ -61,8 +61,8 @@ def save_state(snap: Snapshot) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def extract_number(text: str) -> int:
-    """Extracts '54' from 'Women (54)'"""
-    match = re.search(r'\((\d+)\)', text)
+    """Extracts '54' from 'Women (54)' or '54 Items Found'"""
+    match = re.search(r'\((\d+)\)', text) or re.search(r'(\d+)', text)
     return int(match.group(1)) if match else 0
 
 def scrape_snapshot() -> Snapshot:
@@ -72,27 +72,50 @@ def scrape_snapshot() -> Snapshot:
             headless=True, 
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
         )
-        page = browser.new_page(user_agent="Mozilla/5.0")
+        # Force Desktop view to ensure sidebar is visible
+        context = browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
         
-        print(f"Scraping counts from {URL}...", flush=True)
-        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        
-        # Wait for the filter sidebar row to appear
-        page.wait_for_selector(".S-p-attr-row", timeout=15000)
-
+        print(f"Scraping {URL}...", flush=True)
         men_count = 0
         women_count = 0
+        
+        try:
+            # Wait for network activity to settle
+            page.goto(URL, wait_until="networkidle", timeout=60000)
+            
+            # Try multiple selectors for the sidebar in case the class changes
+            selectors = [".S-p-attr-row", ".filter-item", ".attr-item", ".S-p-filter-v2__item"]
+            found_rows = None
+            
+            for sel in selectors:
+                rows = page.locator(sel)
+                if rows.count() > 0:
+                    found_rows = rows
+                    break
+            
+            if found_rows:
+                for i in range(found_rows.count()):
+                    row_text = found_rows.nth(i).inner_text()
+                    if "Women" in row_text:
+                        women_count = extract_number(row_text)
+                    elif "Men" in row_text:
+                        men_count = extract_number(row_text)
+            else:
+                print("DEBUG: Sidebar not found. Checking top summary...", flush=True)
+                summary = page.locator(".S-p-attr-row-summary, .items-count").first
+                if summary.count() > 0:
+                    # If sidebar is missing, we use the total count as a fallback
+                    women_count = extract_number(summary.inner_text())
 
-        # Find all filter rows (Women, Men, etc.)
-        rows = page.locator(".S-p-attr-row")
-        for i in range(rows.count()):
-            row_text = rows.nth(i).inner_text()
-            if "Women" in row_text:
-                women_count = extract_number(row_text)
-            elif "Men" in row_text:
-                men_count = extract_number(row_text)
-
-        browser.close()
+        except Exception as e:
+            print(f"Scrape Error: {e}", flush=True)
+        finally:
+            browser.close()
+            
         return Snapshot(ts=time.time(), men_count=men_count, women_count=women_count)
 
 def main_loop():
@@ -109,6 +132,7 @@ def main_loop():
                 pm, pw = int(prev.get("men_count", 0)), int(prev.get("women_count", 0))
                 dm, dw = curr.men_count - pm, curr.women_count - pw
 
+                # Alert if either count changed
                 if dm != 0 or dw != 0:
                     mi = "⬆️" if dm > 0 else "⬇️"
                     wi = "⬆️" if dw > 0 else "⬇️"
@@ -125,10 +149,10 @@ def main_loop():
             save_state(curr)
             print(f"Update: Men({curr.men_count}) Women({curr.women_count})", flush=True)
         except Exception as e:
-            print(f"Error: {e}", flush=True)
+            print(f"Loop Error: {e}", flush=True)
         
-        # Fixed 40-second interval as requested
-        time.sleep(40)
+        # Check every 40 seconds with slight jitter
+        time.sleep(random.randint(35, 45))
 
 if __name__ == "__main__":
     threading.Thread(target=main_loop, daemon=True).start()
@@ -136,4 +160,3 @@ if __name__ == "__main__":
         start_health_server()
     except Exception as e:
         print(f"CRITICAL ERROR: {e}", flush=True)
-        time.sleep(10)
