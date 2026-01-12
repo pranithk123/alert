@@ -15,8 +15,6 @@ URL = "https://www.sheinindia.in/c/sverse-5939-37961"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 STATE_FILE = "state.json"
-
-# Railway provides the PORT variable; we default to 8080 if not found
 PORT = int(os.getenv("PORT", "8080")) 
 
 @dataclass
@@ -26,7 +24,7 @@ class Snapshot:
     first_products: List[str]
 
 def start_health_server():
-    """Runs in the main thread to keep the container alive and responding to Railway pings."""
+    """Runs in the main thread to prevent Railway from stopping the container."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -37,12 +35,12 @@ def start_health_server():
             return 
 
     server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"✅ Health server active on port {PORT}", flush=True)
+    print(f"✅ Health server active on port {PORT}. Keeping container alive.", flush=True)
     server.serve_forever()
 
 def telegram_send(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[WARN] Telegram credentials missing. Message: {text}", flush=True)
+        print(f"[WARN] Telegram credentials missing.", flush=True)
         return
     endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -69,20 +67,16 @@ def normalize_product_signature(item: Dict[str, Any]) -> str:
     return f"{title} | {href}"
 
 def scrape_snapshot() -> Snapshot:
-    # Explicitly set the path where Dockerfile installed the browser
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/pw-browsers"
     
     with sync_playwright() as p:
-        # Heavily optimized flags to prevent OOM (Out of Memory) crashes on Railway
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", # Uses /tmp instead of restricted /dev/shm
-                "--disable-gpu",            # Reduces memory footprint
-                "--single-process",         # Consolidates Chromium processes to save RAM
-                "--js-flags='--max-old-space-size=256'" # Limits JavaScript engine memory
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process" # Keeps memory usage consolidated
             ]
         )
         context = browser.new_context(
@@ -98,7 +92,6 @@ def scrape_snapshot() -> Snapshot:
 
             products = []
             seen = set()
-            # Selectors based on SHEIN's typical structure
             selectors = ["a[href*='/p/']", "a[href*='-p-']", ".product-card a"]
 
             for sel in selectors:
@@ -114,15 +107,13 @@ def scrape_snapshot() -> Snapshot:
                     seen.add(href)
                     products.append({"title": text[:50], "href": href})
                 if len(products) > 5: break
-            
+
             sigs = [normalize_product_signature(x) for x in products[:10]]
             return Snapshot(ts=time.time(), product_count=len(products), first_products=sigs)
-        
         finally:
-            browser.close() # Ensure browser always closes to free memory
+            browser.close()
 
 def main_loop():
-    """Watcher logic running in a background thread."""
     print("🚀 Watcher background thread started...", flush=True)
     telegram_send("✅ SHEIN watcher started.\n" + URL)
     
@@ -141,20 +132,16 @@ def main_loop():
         except Exception as e:
             print(f"Scraper Error: {e}", flush=True)
         
-        # Jittered sleep to avoid detection and reduce resource load
         time.sleep(random.randint(60, 120))
 
 if __name__ == "__main__":
-    # 1. Start Scraper Loop in a background thread
-    # This prevents the scraper from blocking the health server
-    scraper_thread = threading.Thread(target=main_loop, daemon=True)
-    scraper_thread.start()
+    # 1. Start Scraper in Background
+    threading.Thread(target=main_loop, daemon=True).start()
     
-    # 2. Run Health Server in the FOREGROUND (Main Thread)
-    # This is the 'anchor'. As long as this runs, the container stays UP.
+    # 2. Start Health Server in Foreground (Main Thread)
+    # This prevents the script from ever finishing, so Railway keeps it alive
     try:
         start_health_server()
     except Exception as e:
-        print(f"Health Server Crash: {e}", flush=True)
-        # Give you time to see the error in logs
-        time.sleep(60)
+        print(f"Critical Server Error: {e}", flush=True)
+        time.sleep(10)
