@@ -136,5 +136,14 @@ def main_loop():
         time.sleep(random.randint(40, 80))
 
 if __name__ == "__main__":
+    # 1. Start health server in a background thread
     threading.Thread(target=start_health_server, daemon=True).start()
-    main_loop()
+    
+    # 2. Keep the main thread alive FOREVER
+    print("BOOT: Starting main watcher loop", flush=True)
+    while True:
+        try:
+            main_loop() # This function has its own while True loop inside
+        except Exception as e:
+            print(f"CRITICAL: Main loop crashed with {e}. Restarting in 30s...", flush=True)
+            time.sleep(30)
